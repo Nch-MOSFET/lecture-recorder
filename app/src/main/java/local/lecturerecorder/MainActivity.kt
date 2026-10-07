@@ -48,6 +48,7 @@ class MainActivity : Activity() {
     private lateinit var checks: LinearLayout
     private lateinit var lectureList: LinearLayout
     private lateinit var pendingText: TextView
+    private lateinit var baseFolderText: TextView
 
     private var modelState = "確認中…"
     private val refresher = object : Runnable {
@@ -101,6 +102,28 @@ class MainActivity : Activity() {
     private fun runtimePermissions(): Array<String> =
         if (Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
         else arrayOf(Manifest.permission.RECORD_AUDIO)
+    /** 「使用されていないアプリ」の自動削除（休止状態）の対象外になっているか */
+    private fun unusedAppRestrictionsOff(): Boolean =
+        runCatching { packageManager.isAutoRevokeWhitelisted }.getOrDefault(false)
+
+    /** 「使用されていないアプリ」の設定画面（アプリ情報）を開く */
+    private fun openUnusedAppSettings() {
+        AlertDialog.Builder(this)
+            .setTitle("「使用されていないアプリ」をオフにしてください")
+            .setMessage(
+                "この設定が有効なままだと、しばらくアプリを開かなかったときに Android が権限と保存先の許可を取り消し、" +
+                    "録音が保存できなくなります（実際に取り消された例があります）。\n\n" +
+                    "設定画面で「アプリが使用されていない場合に権限を削除」や「使用されていないアプリを一時停止する」をオフにしてください。",
+            )
+            .setPositiveButton("設定を開く") { _, _ ->
+                runCatching {
+                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+                }.onFailure { toast("設定画面を開けませんでした：${it.message}") }
+            }
+            .setNegativeButton("あとで", null)
+            .show()
+    }
+
     private fun batteryExempt() = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
 
     private fun ensureServiceRunning() {
@@ -169,6 +192,27 @@ class MainActivity : Activity() {
         root.addView(numberRow("終了を遅らせる（分）", store.endLateMin) { store.endLateMin = it; afterScheduleChange() })
 
         root.addView(header("保存"))
+        baseFolderText = text("", 14f)
+        root.addView(baseFolderText)
+        root.addView(text(
+            "親フォルダーを1つ選ぶと、その下に科目名のフォルダーを自動で作って保存します（同じ名前のフォルダーが既にあればそれを使います）。" +
+                "科目ごとに別の場所にしたいときは、その科目の編集画面で個別に指定できます（個別の指定が優先されます）。", 13f,
+        ))
+        root.addView(hbox(
+            button("親フォルダーを選ぶ", weight = true) {
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                    addFlags(
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                            Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
+                    )
+                }, REQ_BASE_FOLDER)
+            },
+            button("端末に保存", weight = true) {
+                store.baseFolderUri = null
+                store.baseFolderLabel = null
+                refreshAll()
+            },
+        ))
         pendingText = text("", 14f)
         root.addView(pendingText)
         root.addView(button("保存待ちを今すぐ書き出す") {
@@ -186,6 +230,7 @@ class MainActivity : Activity() {
         if (checked) {
             store.autoEnabled = true
             ensureServiceRunning()
+            if (!unusedAppRestrictionsOff()) openUnusedAppSettings()
         } else {
             if (RecorderService.instance != null) {
                 RecorderService.startFromUi(this, RecorderService.ACTION_DISABLE)
@@ -293,6 +338,32 @@ class MainActivity : Activity() {
         row(batteryExempt(), "電池の最適化の対象外（授業中に止められないため）", "設定") {
             startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
         }
+        row(
+            unusedAppRestrictionsOff(),
+            "「使用されていないアプリ」の対象外（権限と保存先の許可が消えるのを防ぐ）",
+            "設定",
+        ) { openUnusedAppSettings() }
+        fun granted(uri: String?) = uri != null &&
+            contentResolver.persistedUriPermissions.any { it.uri.toString() == uri && it.isWritePermission }
+        val base = store.baseFolderUri
+        // 個別の保存先の許可が外れていて親フォルダーがあるなら、親フォルダーに任せる
+        if (base != null) {
+            store.lectures.filter { it.folderUri != null && !granted(it.folderUri) }.forEach {
+                store.upsert(it.copy(folderUri = null, folderLabel = null))
+            }
+        }
+        val lost = store.lectures.filter { it.folderUri != null && !granted(it.folderUri) }.map { it.name }
+        val baseLost = base != null && !granted(base)
+        row(
+            lost.isEmpty() && !baseLost && (base != null || store.lectures.all { it.folderUri != null }),
+            when {
+                baseLost -> "親フォルダーの許可が外れています（選び直してください）"
+                lost.isNotEmpty() -> "保存先の許可が外れています：${lost.joinToString("、")}（科目を開いて選び直してください）"
+                base != null -> "保存先：${store.baseFolderLabel}／科目名"
+                else -> "保存先が未設定（端末の Documents/$DEFAULT_DIR/ に保存します）"
+            },
+            null, null,
+        )
         row(modelState.startsWith("OK"), "日本語の端末内音声認識：$modelState", "ダウンロード".takeIf { Build.VERSION.SDK_INT >= 33 }) { downloadModel() }
     }
 
@@ -317,7 +388,10 @@ class MainActivity : Activity() {
                     append("  ／ ${it.format(DateTimeFormatter.ofPattern("M/d"))} は録音しない")
                 }
                 if (l.language != Language.JA) append("  ／ 言語：${l.language.label}")
-                append("\n保存先：${l.folderLabel ?: "端末 Documents/$DEFAULT_DIR/${l.name}"}")
+                val where = l.folderLabel
+                    ?: store.baseFolderLabel?.let { "$it/${l.name}" }
+                    ?: "端末 Documents/$DEFAULT_DIR/${l.name}"
+                append("\n保存先：$where")
             }
             val row = card(title, text(sub, 13f)).apply {
                 isClickable = true
@@ -328,6 +402,8 @@ class MainActivity : Activity() {
             lectureList.addView(row)
         }
         val pending = store.pending
+        baseFolderText.text = store.baseFolderLabel?.let { "親フォルダー：$it（この下に科目名のフォルダーを作ります）" }
+            ?: "親フォルダー：未設定（端末の Documents/$DEFAULT_DIR/ に保存します）"
         pendingText.text = buildString {
             append(if (pending.isEmpty()) "保存待ちのファイルはありません" else "保存待ち ${pending.size}件：" + pending.joinToString("、") { it.displayName })
             store.lastError?.let { append("\n最後のエラー：$it") }
@@ -406,6 +482,20 @@ class MainActivity : Activity() {
         val uri = data?.data
         if (resultCode != RESULT_OK || uri == null) return
         when (requestCode) {
+            REQ_BASE_FOLDER -> {
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                    )
+                    store.baseFolderUri = uri.toString()
+                    store.baseFolderLabel = Exporter.treeLabel(this, uri)
+                    Exporter.clearFolderCache(this)
+                    refreshAll()
+                    toast("親フォルダーを設定しました。科目名のフォルダーを自動で作ります")
+                } catch (e: SecurityException) {
+                    toast("このフォルダーには書き込みの許可を保存できませんでした：${e.message}")
+                }
+            }
             REQ_OPEN_JSON -> readTimetableJson(uri)
             REQ_SAVE_SAMPLE -> writeText(uri, TimetableJson.sample(), "サンプルを保存しました。メモ帳などで書き換えてから読み込んでください")
             REQ_SAVE_EXPORT -> writeText(uri, TimetableJson.export(store.lectures), "今の時間割を保存しました")
@@ -547,6 +637,7 @@ class MainActivity : Activity() {
     companion object {
         const val ACTION_RESUME = "resume"
         private const val REQ_PERM = 10
+        private const val REQ_BASE_FOLDER = 29
         private const val REQ_OPEN_JSON = 30
         private const val REQ_SAVE_SAMPLE = 31
         private const val REQ_SAVE_EXPORT = 32

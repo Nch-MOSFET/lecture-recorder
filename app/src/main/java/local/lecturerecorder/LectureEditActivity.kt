@@ -138,7 +138,7 @@ class LectureEditActivity : Activity() {
         root.addView(folderText)
         root.addView(LinearLayout(this).apply {
             addView(button("フォルダーを選ぶ") { pickFolder() }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(button("端末に保存") { folderUri = null; folderLabel = null; refresh() },
+            addView(button("個別の指定を外す") { folderUri = null; folderLabel = null; refresh() },
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         })
         root.addView(TextView(this).apply {
@@ -194,7 +194,9 @@ class LectureEditActivity : Activity() {
     private fun refresh() {
         startButton.text = "開始 ${start.format(hm)}"
         endButton.text = "終了 ${end.format(hm)}"
-        folderText.text = folderLabel ?: "端末：Documents/$DEFAULT_DIR/（科目名）"
+        folderText.text = folderLabel
+            ?: Store(this).baseFolderLabel?.let { "親フォルダーに従う：$it/${nameEdit.text}" }
+            ?: "端末：Documents/$DEFAULT_DIR/（科目名）"
         val next = nextDate()
         skipSwitch.text = "次回（${next.format(DateTimeFormatter.ofPattern("M/d(E)", Locale.JAPAN))}）は録音しない"
     }

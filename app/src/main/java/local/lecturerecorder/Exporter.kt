@@ -19,6 +19,11 @@ const val DEFAULT_DIR = "講義録音"
 object Exporter {
     private val lock = Any()
 
+    /** 保存先の親フォルダーを選び直したときは、覚えているフォルダーを捨てる */
+    fun clearFolderCache(context: Context) {
+        Store(context).folderCache = emptyMap()
+    }
+
     fun enqueue(context: Context, items: List<PendingExport>) = synchronized(lock) {
         val store = Store(context)
         store.pending = store.pending + items
@@ -46,22 +51,106 @@ object Exporter {
     }
 
     private fun export(context: Context, lecture: Lecture?, item: PendingExport, file: File): Boolean {
-        val tree = lecture?.folderUri?.let(Uri::parse)
-        return if (tree != null) exportToTree(context, tree, item, file)
-        else exportToDocuments(context, item, file)
+        val store = Store(context)
+        val own = lecture?.folderUri?.let(Uri::parse)
+        val base = store.baseFolderUri?.let(Uri::parse)
+        val tree = own ?: base ?: return exportToDocuments(context, item, file)
+        val underBase = own == null
+        return try {
+            exportToTree(context, tree, item, file, subFolder = if (underBase) item.lectureName else null)
+        } catch (t: Throwable) {
+            // 保存先が使えない（アプリが消えた・許可が外れた・同期アプリの入れ替えなど）。
+            // ファイルを失わないよう端末内へ退避し、保存先の設定を外して知らせる
+            Log.e(TAG, "保存先に書けないため端末内へ退避: ${item.displayName}", t)
+            if (underBase) {
+                store.baseFolderUri = null
+                store.baseFolderLabel = null
+            } else {
+                store.find(item.lectureId)?.let { store.upsert(it.copy(folderUri = null, folderLabel = null)) }
+            }
+            store.lastError = "${item.lectureName} の保存先に書けませんでした（${t.javaClass.simpleName}）。" +
+                "端末内の Documents/$DEFAULT_DIR/ に保存したので、保存先を選び直してください。"
+            exportToDocuments(context, item, file)
+        }
     }
 
-    private fun exportToTree(context: Context, tree: Uri, item: PendingExport, file: File): Boolean {
+    /** 保存先の許可が残っているか（状態表示用） */
+    fun persistedFolders(context: Context): String =
+        context.contentResolver.persistedUriPermissions.joinToString("、") {
+            "${it.uri.authority}（書き込み=${it.isWritePermission}）"
+        }.ifEmpty { "なし" }
+
+    private fun exportToTree(context: Context, tree: Uri, item: PendingExport, file: File, subFolder: String?): Boolean {
         val resolver = context.contentResolver
-        val dirDoc = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
-        val name = uniqueName(childNames(context, tree), item.displayName)
+        val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+        val dirDoc = if (subFolder == null) root else findOrCreateDir(context, tree, root, safeName(subFolder))
+        val name = uniqueName(childNames(context, tree, dirDoc), item.displayName)
         val doc = DocumentsContract.createDocument(resolver, dirDoc, item.mime, name) ?: return false
         resolver.openOutputStream(doc, "w")!!.use { out -> file.inputStream().use { it.copyTo(out) } }
         return true
     }
 
-    private fun childNames(context: Context, tree: Uri): Set<String> {
-        val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+    /**
+     * 親フォルダーの下から科目名のフォルダーを探し、なければ作る。
+     * 同じ名前のフォルダーを二重に作らないよう、見つけた場所を覚えておき、
+     * 比較は全角・半角や濁点の表記ゆれ（Unicode 正規化）と大文字小文字を吸収して行う。
+     */
+    private fun findOrCreateDir(context: Context, tree: Uri, parent: Uri, name: String): Uri {
+        val store = Store(context)
+        val cacheKey = "${tree}|$name"
+        store.folderCache[cacheKey]?.let { cached ->
+            val uri = Uri.parse(cached)
+            if (dirExists(context, uri)) return uri
+            store.folderCache = store.folderCache - cacheKey
+        }
+        findDir(context, tree, parent, name)?.let { found ->
+            store.folderCache = store.folderCache + (cacheKey to found.toString())
+            return found
+        }
+        val created = DocumentsContract.createDocument(
+            context.contentResolver, parent, DocumentsContract.Document.MIME_TYPE_DIR, name,
+        ) ?: error("フォルダー「$name」を作れませんでした")
+        // 作成直後にもう一度探し、取り違え（別名で作られた等）がないか確かめる
+        val resolved = findDir(context, tree, parent, name) ?: created
+        store.folderCache = store.folderCache + (cacheKey to resolved.toString())
+        Log.i(TAG, "フォルダーを作成: $name")
+        return resolved
+    }
+
+    private fun findDir(context: Context, tree: Uri, parent: Uri, name: String): Uri? {
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(parent))
+        val target = normalize(name)
+        context.contentResolver.query(
+            children,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+            ),
+            null, null, null,
+        )?.use {
+            while (it.moveToNext()) {
+                if (it.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR &&
+                    normalize(it.getString(1).orEmpty()) == target
+                ) {
+                    return DocumentsContract.buildDocumentUriUsingTree(tree, it.getString(0))
+                }
+            }
+        }
+        return null
+    }
+
+    private fun dirExists(context: Context, doc: Uri): Boolean = runCatching {
+        context.contentResolver.query(doc, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID), null, null, null)
+            ?.use { it.moveToFirst() } == true
+    }.getOrDefault(false)
+
+    /** 表記ゆれを吸収して比べるための正規化 */
+    private fun normalize(s: String): String =
+        java.text.Normalizer.normalize(s.trim(), java.text.Normalizer.Form.NFKC).lowercase()
+
+    private fun childNames(context: Context, tree: Uri, parent: Uri): Set<String> {
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(parent))
         val names = mutableSetOf<String>()
         runCatching {
             context.contentResolver.query(children, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use {

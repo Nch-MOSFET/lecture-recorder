@@ -155,6 +155,25 @@ class Store(context: Context) {
             prefs.edit().putString("activeRecording", v).commit()
         }
 
+    /** 保存先の親フォルダー。科目ごとの指定がなければ、この下に科目名のフォルダーを作って保存する */
+    var baseFolderUri: String?
+        get() = prefs.getString("baseFolderUri", null)
+        set(v) = prefs.edit().putString("baseFolderUri", v).apply()
+
+    var baseFolderLabel: String?
+        get() = prefs.getString("baseFolderLabel", null)
+        set(v) = prefs.edit().putString("baseFolderLabel", v).apply()
+
+    /** 親フォルダーの下に見つけた科目フォルダーの場所（「ツリーURI|科目名」→ フォルダーのURI） */
+    var folderCache: Map<String, String>
+        get() {
+            val o = JSONObject(prefs.getString("folderCache", "{}"))
+            return o.keys().asSequence().associateWith { o.getString(it) }
+        }
+        set(v) {
+            prefs.edit().putString("folderCache", JSONObject(v).toString()).apply()
+        }
+
     var lastError: String?
         get() = prefs.getString("lastError", null)
         set(v) = prefs.edit().putString("lastError", v).apply()

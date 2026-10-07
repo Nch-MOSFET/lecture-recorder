@@ -38,6 +38,8 @@ class ImportReceiver : BroadcastReceiver() {
             ACTION_DUMP -> {
                 val dump = buildString {
                     append("auto=${store.autoEnabled} early=${store.startEarlyMin} late=${store.endLateMin} pending=${store.pending.size}\n")
+                    append("保存先の許可: ${Exporter.persistedFolders(context)}\n")
+                    append("最後のエラー: ${store.lastError}\n")
                     for (l in store.lectures) {
                         append("${l.name} | ${l.day} ${l.start}-${l.end} | enabled=${l.enabled} | folder=${l.folderLabel} | dates=${l.dates.size} next=${l.nextDate(LocalDate.now())} | skip=${l.skipDate}\n")
                     }

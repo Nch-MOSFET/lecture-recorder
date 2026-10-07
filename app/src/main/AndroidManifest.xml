@@ -18,6 +18,10 @@
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
+        <!-- 保存先に選んだフォルダー（Google ドライブなど）のプロバイダーが見えるようにする -->
+        <intent>
+            <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+        </intent>
     </queries>
 
     <application
