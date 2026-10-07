@@ -166,31 +166,6 @@ class MainActivity : Activity() {
         checks = vbox()
         root.addView(checks)
 
-        root.addView(header("時間割"))
-        lectureList = vbox()
-        root.addView(lectureList)
-        root.addView(button("＋ 授業を追加") {
-            startActivity(Intent(this, LectureEditActivity::class.java))
-        })
-
-        root.addView(header("時間割ファイル（JSON）"))
-        root.addView(text(
-            "時間割を JSON ファイルでまとめて読み込めます。書き方はサンプルの中に説明があります。" +
-                "「今の時間割を保存」は、アプリを入れ直す前のバックアップにも使えます（保存先フォルダーは含みません）。", 13f,
-        ))
-        root.addView(button("JSON から時間割を読み込む") { openTimetableJson() })
-        root.addView(hbox(
-            button("サンプルを保存", weight = true) { createJsonFile(REQ_SAVE_SAMPLE, "講義録音_時間割サンプル.json") },
-            button("今の時間割を保存", weight = true) {
-                if (store.lectures.isEmpty()) toast("時間割が空です")
-                else createJsonFile(REQ_SAVE_EXPORT, "講義録音_時間割_${java.time.LocalDate.now()}.json")
-            },
-        ))
-
-        root.addView(header("録音の前後の余裕"))
-        root.addView(numberRow("開始を早める（分）", store.startEarlyMin) { store.startEarlyMin = it; afterScheduleChange() })
-        root.addView(numberRow("終了を遅らせる（分）", store.endLateMin) { store.endLateMin = it; afterScheduleChange() })
-
         root.addView(header("保存"))
         baseFolderText = text("", 14f)
         root.addView(baseFolderText)
@@ -221,6 +196,31 @@ class MainActivity : Activity() {
                 runOnUiThread { refreshAll(); toast(if (left == 0) "書き出しました" else "${left}件が保存待ちのままです") }
             }.start()
         })
+
+        root.addView(header("時間割"))
+        lectureList = vbox()
+        root.addView(lectureList)
+        root.addView(button("＋ 授業を追加") {
+            startActivity(Intent(this, LectureEditActivity::class.java))
+        })
+
+        root.addView(header("時間割ファイル（JSON）"))
+        root.addView(text(
+            "時間割を JSON ファイルでまとめて読み込めます。書き方はサンプルの中に説明があります。" +
+                "「今の時間割を保存」は、アプリを入れ直す前のバックアップにも使えます（保存先フォルダーは含みません）。", 13f,
+        ))
+        root.addView(button("JSON から時間割を読み込む") { openTimetableJson() })
+        root.addView(hbox(
+            button("サンプルを保存", weight = true) { createJsonFile(REQ_SAVE_SAMPLE, "講義録音_時間割サンプル.json") },
+            button("今の時間割を保存", weight = true) {
+                if (store.lectures.isEmpty()) toast("時間割が空です")
+                else createJsonFile(REQ_SAVE_EXPORT, "講義録音_時間割_${java.time.LocalDate.now()}.json")
+            },
+        ))
+
+        root.addView(header("録音の前後の余裕"))
+        root.addView(numberRow("開始を早める（分）", store.startEarlyMin) { store.startEarlyMin = it; afterScheduleChange() })
+        root.addView(numberRow("終了を遅らせる（分）", store.endLateMin) { store.endLateMin = it; afterScheduleChange() })
 
         return screen(getString(R.string.app_name), root)
     }
