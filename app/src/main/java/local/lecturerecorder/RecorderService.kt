@@ -42,6 +42,9 @@ class RecorderService : Service() {
     private val io = Executors.newSingleThreadExecutor()
     private var session: RecordingSession? = null
     private var manualLectureId: String? = null
+    /** 自由録音の内容（名前・言語）。止めるまで録音を続ける */
+    private var freeLecture: Lecture? = null
+    private var freeStartedAt: LocalDateTime? = null
     private var wakeLock: PowerManager.WakeLock? = null
     /** 停止後の後処理（文字起こしの締め・変換・書き出し）が残っている件数 */
     private var finalizing = 0
@@ -72,6 +75,10 @@ class RecorderService : Service() {
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIF_RESUME_ID)
         when (intent?.action) {
             ACTION_MANUAL_START -> intent.getStringExtra(EXTRA_LECTURE_ID)?.let { manualStart(it) }
+            ACTION_FREE_START -> freeStart(
+                intent.getStringExtra(EXTRA_TITLE).orEmpty(),
+                Language.of(intent.getStringExtra(EXTRA_LANGUAGE)),
+            )
             ACTION_STOP_CURRENT -> stopCurrentByUser()
             ACTION_DISABLE -> {
                 store.autoEnabled = false
@@ -95,9 +102,21 @@ class RecorderService : Service() {
     fun evaluate() {
         val now = LocalDateTime.now()
         val scheduled = if (store.autoEnabled) Schedule.current(store, now) else null
-        val manual = manualLectureId?.let { store.find(it) }
-
+        // 自由録音を始めた後に授業の時刻になったら、自由録音を保存して授業の録音に切り替える
+        // （授業中にあえて始めた自由録音は止めない）
+        val freeAt = freeStartedAt
+        if (scheduled != null && freeLecture != null && freeAt != null && scheduled.start > freeAt) {
+            val running = session
+            if (running != null && running.manual && running.slot.lecture.isFree()) {
+                finishSession(running)
+                session = null
+            }
+            freeLecture = null
+            freeStartedAt = null
+        }
         val current = session
+        val manual = manualLectureId?.let { store.find(it) } ?: freeLecture
+
         when {
             // 手動録音は、止めるまで（または科目の終了時刻まで）続ける
             current != null && current.manual -> {
@@ -115,7 +134,7 @@ class RecorderService : Service() {
         }
         if (session == null && now >= retryAfter) {
             when {
-                manual != null && manualLectureId != null -> startSession(manualSlot(manual, now), manual = true)
+                manual != null -> startSession(manualSlot(manual, now), manual = true)
                 scheduled != null -> startSession(scheduled, manual = false)
             }
         }
@@ -137,6 +156,8 @@ class RecorderService : Service() {
     private val tick = Runnable { evaluate() }
 
     private fun manualSlot(lecture: Lecture, now: LocalDateTime): Slot {
+        // 自由録音は止めるまで続ける
+        if (lecture.isFree()) return Slot(lecture, now.toLocalDate(), now, LocalDateTime.of(9999, 12, 31, 0, 0))
         // 今日の授業時間中ならその終了時刻まで、それ以外は3時間で止める
         val todayEnd = LocalDateTime.of(now.toLocalDate(), lecture.end)
         val end = if (lecture.day == now.dayOfWeek && now < todayEnd.plusMinutes(store.endLateMin.toLong()))
@@ -151,12 +172,36 @@ class RecorderService : Service() {
             session = null
         }
         manualLectureId = lectureId
+        freeLecture = null
+        freeStartedAt = null
+    }
+
+    /** 授業とは関係なく、今から録音を始める（止めるまで続ける） */
+    private fun freeStart(title: String, language: Language) {
+        val current = session
+        if (current != null) {
+            finishSession(current)
+            session = null
+        }
+        manualLectureId = null
+        val now = LocalDateTime.now()
+        freeStartedAt = now
+        freeLecture = Lecture(
+            id = FREE_ID_PREFIX + System.currentTimeMillis(),
+            name = title.trim().ifEmpty { "録音" },
+            day = now.dayOfWeek,
+            start = now.toLocalTime().withSecond(0).withNano(0),
+            end = now.toLocalTime().withSecond(0).withNano(0),
+            language = language,
+        )
     }
 
     private fun stopCurrentByUser() {
         val current = session ?: return
         if (current.manual) {
             manualLectureId = null
+            freeLecture = null
+            freeStartedAt = null
         } else {
             // 自動録音中に止めた場合は、この回を再開しないようスキップ扱いにする
             store.find(current.slot.lecture.id)?.let { store.upsert(it.copy(skipDate = current.slot.date)) }
@@ -167,15 +212,20 @@ class RecorderService : Service() {
 
     private fun startSession(slot: Slot, manual: Boolean) {
         val dir = File(filesDir, "recording").apply { mkdirs() }
-        val base = "${Exporter.safeName(slot.lecture.name)}_${slot.date.format(DateTimeFormatter.ISO_LOCAL_DATE)}"
+        val free = slot.lecture.isFree()
+        val base = if (free) {
+            "${Exporter.safeName(slot.lecture.name)}_${LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HHmm"))}"
+        } else {
+            "${Exporter.safeName(slot.lecture.name)}_${slot.date.format(DateTimeFormatter.ISO_LOCAL_DATE)}"
+        }
         val stamp = System.currentTimeMillis()
         val aac = File(dir, "$stamp.aac")
         val txt = File(dir, "$stamp.txt")
-        store.activeRecording = listOf(slot.lecture.id, slot.lecture.name, base, aac.path, txt.path).joinToString("|")
+        store.activeRecording = listOf(slot.lecture.id, slot.lecture.name, base, aac.path, txt.path, folderFor(slot.lecture).orEmpty()).joinToString("|")
         val s = RecordingSession(slot, manual, base, aac, txt)
         session = s
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LectureRecorder:rec").apply { acquire(6 * 60 * 60 * 1000L) }
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LectureRecorder:rec").apply { acquire(if (free) 24 * 60 * 60 * 1000L else 6 * 60 * 60 * 1000L) }
         s.start()
         Log.i(TAG, "start ${slot.lecture.name} until ${slot.end}")
     }
@@ -183,13 +233,16 @@ class RecorderService : Service() {
     private fun finishSession(s: RecordingSession) {
         Log.i(TAG, "finish ${s.slot.lecture.name}")
         finalizing++
-        s.stop { finalize(s.slot.lecture, s.baseName, s.aacFile, s.txtFile) }
+        s.stop { finalize(s.slot.lecture, s.baseName, s.aacFile, s.txtFile, folderFor(s.slot.lecture)) }
         runCatching { wakeLock?.release() }
         wakeLock = null
     }
 
     /** 停止後の後処理：m4a へ変換し、保存先への書き出しを予約する。 */
-    private fun finalize(lecture: Lecture, base: String, aac: File, txt: File) {
+    /** 保存先のフォルダー名（自由録音はまとめて「その他の録音」） */
+    private fun folderFor(lecture: Lecture): String? = if (lecture.isFree()) FREE_FOLDER else null
+
+    private fun finalize(lecture: Lecture, base: String, aac: File, txt: File, folder: String?) {
         io.execute {
             val items = mutableListOf<PendingExport>()
             if (aac.exists() && aac.length() > 0) {
@@ -197,14 +250,14 @@ class RecorderService : Service() {
                 val (file, name) = if (AudioRecorder.remuxToM4a(aac, m4a)) {
                     aac.delete(); m4a to "$base.m4a"
                 } else aac to "$base.aac"
-                items += PendingExport(file.path, lecture.id, lecture.name, name, Exporter.mimeFor(name))
+                items += PendingExport(file.path, lecture.id, lecture.name, name, Exporter.mimeFor(name), folder)
             } else {
                 aac.delete()
             }
             // 見出しだけで本文（[時:分:秒] の行）がなければ書き出さない
             val hasText = txt.exists() && txt.useLines { lines -> lines.any { it.startsWith("[") } }
             if (hasText) {
-                items += PendingExport(txt.path, lecture.id, lecture.name, "$base.txt", "text/plain")
+                items += PendingExport(txt.path, lecture.id, lecture.name, "$base.txt", "text/plain", folder)
             } else {
                 txt.delete()
             }
@@ -229,7 +282,7 @@ class RecorderService : Service() {
             start = java.time.LocalTime.MIDNIGHT, end = java.time.LocalTime.MIDNIGHT)
         Log.w(TAG, "recovering interrupted recording ${info[2]}")
         finalizing++
-        finalize(lecture, info[2] + "_中断", File(info[3]), File(info[4]))
+        finalize(lecture, info[2] + "_中断", File(info[3]), File(info[4]), info.getOrNull(5)?.ifEmpty { null })
     }
 
     fun snapshot(): Status {
@@ -273,7 +326,7 @@ class RecorderService : Service() {
         val text: String
         if (s != null) {
             title = "● 録音中：${s.slot.lecture.name}"
-            text = "${s.slot.end.format(hm)} に停止" + (next?.let { "／次：${it.lecture.name} ${it.start.format(fmt)}" } ?: "")
+            text = (if (s.slot.lecture.isFree()) "停止するまで録音" else "${s.slot.end.format(hm)} に停止") + (next?.let { "／次：${it.lecture.name} ${it.start.format(fmt)}" } ?: "")
         } else {
             title = "自動録音 待機中"
             text = next?.let { "次：${it.lecture.name} ${it.start.format(fmt)}" } ?: "予定されている授業はありません"
@@ -374,6 +427,9 @@ class RecorderService : Service() {
 
     companion object {
         const val ACTION_MANUAL_START = "manual_start"
+        const val ACTION_FREE_START = "free_start"
+        const val EXTRA_TITLE = "title"
+        const val EXTRA_LANGUAGE = "language"
         const val ACTION_STOP_CURRENT = "stop_current"
         const val ACTION_DISABLE = "disable"
         const val EXTRA_LECTURE_ID = "lecture_id"
@@ -391,9 +447,17 @@ class RecorderService : Service() {
         }
 
         /** アプリの画面から呼ぶ（マイクのフォアグラウンドサービスは画面表示中にしか開始できない） */
-        fun startFromUi(context: Context, action: String? = null, lectureId: String? = null) {
+        fun startFromUi(
+            context: Context,
+            action: String? = null,
+            lectureId: String? = null,
+            title: String? = null,
+            language: Language? = null,
+        ) {
             val i = Intent(context, RecorderService::class.java).setAction(action)
             if (lectureId != null) i.putExtra(EXTRA_LECTURE_ID, lectureId)
+            if (title != null) i.putExtra(EXTRA_TITLE, title)
+            if (language != null) i.putExtra(EXTRA_LANGUAGE, language.key)
             context.startForegroundService(i)
         }
 

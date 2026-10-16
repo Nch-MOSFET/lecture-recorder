@@ -20,8 +20,8 @@ android {
         applicationId = "local.lecturerecorder"
         minSdk = 31
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.5.2"
+        versionCode = 15
+        versionName = "1.6.0"
     }
 
     signingConfigs {

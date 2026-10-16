@@ -57,7 +57,7 @@ object Exporter {
         val tree = own ?: base ?: return exportToDocuments(context, item, file)
         val underBase = own == null
         return try {
-            exportToTree(context, tree, item, file, subFolder = if (underBase) item.lectureName else null)
+            exportToTree(context, tree, item, file, subFolder = if (underBase) item.folderName else null)
         } catch (t: Throwable) {
             // 保存先が使えない（アプリが消えた・許可が外れた・同期アプリの入れ替えなど）。
             // ファイルを失わないよう端末内へ退避し、保存先の設定を外して知らせる
@@ -162,7 +162,7 @@ object Exporter {
 
     private fun exportToDocuments(context: Context, item: PendingExport, file: File): Boolean {
         // 音声と文字起こしを同じ場所に置くため Documents 配下にする（Recordings にはテキストを置けない）
-        val relDir = "${Environment.DIRECTORY_DOCUMENTS}/$DEFAULT_DIR/${safeName(item.lectureName)}/"
+        val relDir = "${Environment.DIRECTORY_DOCUMENTS}/$DEFAULT_DIR/${safeName(item.folderName)}/"
         val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         // 同名があると MediaStore は「(1)」…と付けるが上限がある。こちらで「_2」…を付けて避ける
         val existing = mutableSetOf<String>()

@@ -161,6 +161,7 @@ class MainActivity : Activity() {
             RecorderService.startFromUi(this, RecorderService.ACTION_STOP_CURRENT)
         }
         root.addView(hbox(manualButton, stopButton))
+        root.addView(button("自由録音（授業以外の会話・メモなど）") { pickFreeRecording() })
 
         root.addView(header("事前チェック"))
         checks = vbox()
@@ -247,6 +248,51 @@ class MainActivity : Activity() {
         refreshAll()
     }
 
+    /** 授業と関係なく、名前を付けて今すぐ録音する。止めるまで続ける */
+    private fun pickFreeRecording() {
+        if (!hasMic()) {
+            ensureServiceRunning()
+            return
+        }
+        val pad = dp(20)
+        val nameEdit = EditText(this).apply {
+            setSingleLine()
+            hint = "例：ゼミ打ち合わせ、面談"
+            setText("会話")
+            selectAll()
+        }
+        val languages = Language.entries
+        val languageSpinner = android.widget.Spinner(this).apply {
+            adapter = android.widget.ArrayAdapter(
+                this@MainActivity, android.R.layout.simple_spinner_dropdown_item, languages.map { it.label },
+            )
+        }
+        val body = vbox().apply {
+            setPadding(pad, dp(8), pad, 0)
+            addView(text("名前（ファイル名になります）", 13f))
+            addView(nameEdit)
+            addView(text("文字起こしの言語", 13f).apply { setPadding(0, dp(12), 0, 0) })
+            addView(languageSpinner)
+            addView(text(
+                "「この回の録音を停止」を押すまで録音します。保存先は「$FREE_FOLDER」フォルダーで、" +
+                    "ファイル名は「名前_日付_時刻」になります。" +
+                    "録音中に授業の時刻になったら、ここまでを保存して授業の録音に切り替えます。", 12f,
+            ).apply { setPadding(0, dp(12), 0, 0) })
+        }
+        AlertDialog.Builder(this)
+            .setTitle("自由録音")
+            .setView(body)
+            .setPositiveButton("録音を始める") { _, _ ->
+                RecorderService.startFromUi(
+                    this, RecorderService.ACTION_FREE_START,
+                    title = nameEdit.text.toString(),
+                    language = languages[languageSpinner.selectedItemPosition],
+                )
+            }
+            .setNegativeButton("やめる", null)
+            .show()
+    }
+
     private fun pickManualLecture() {
         val lectures = store.lectures.distinctBy { it.name }
         if (lectures.isEmpty()) {
@@ -283,7 +329,9 @@ class MainActivity : Activity() {
             statusTitle.text = "● 録音中：${st.recordingName}"
             statusTitle.setTextColor(0xFFC62828.toInt())
             statusDetail.text = buildString {
-                append("経過 %d:%02d:%02d／%s に停止".format(sec / 3600, sec / 60 % 60, sec % 60, st.recordingUntil?.format(hm)))
+                val until = st.recordingUntil
+                append("経過 %d:%02d:%02d／".format(sec / 3600, sec / 60 % 60, sec % 60))
+                append(if (until == null || until.year >= 9999) "停止するまで録音" else "${until.format(hm)} に停止")
                 if (st.manual) append("（手動）")
                 st.transcriberStatus?.let { append("\n$it") }
             }

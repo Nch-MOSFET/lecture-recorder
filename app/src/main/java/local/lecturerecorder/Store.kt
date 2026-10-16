@@ -74,18 +74,30 @@ data class PendingExport(
     val lectureName: String,
     val displayName: String,
     val mime: String,
+    /** 保存先のフォルダー名。null なら科目名 */
+    val folder: String? = null,
 ) {
+    /** 保存先で使うフォルダー名 */
+    val folderName: String get() = folder ?: lectureName
+
     fun toJson(): JSONObject = JSONObject()
         .put("localPath", localPath).put("lectureId", lectureId)
         .put("lectureName", lectureName).put("displayName", displayName).put("mime", mime)
+        .put("folder", folder)
 
     companion object {
         fun fromJson(o: JSONObject) = PendingExport(
             o.getString("localPath"), o.getString("lectureId"), o.getString("lectureName"),
-            o.getString("displayName"), o.getString("mime"),
+            o.getString("displayName"), o.getString("mime"), o.optStringOrNull("folder"),
         )
     }
 }
+
+/** 自由録音（授業以外の会話など）。時間割には登録しない */
+const val FREE_ID_PREFIX = "free-"
+const val FREE_FOLDER = "その他の録音"
+
+fun Lecture.isFree(): Boolean = id.startsWith(FREE_ID_PREFIX)
 
 /** 次の授業日（授業日の一覧があるとき）。一覧が空なら null */
 fun Lecture.nextDate(from: LocalDate): LocalDate? = dates.filter { !it.isBefore(from) }.minOrNull()
